@@ -1,0 +1,24 @@
+version: '3.1'
+
+services:
+  gitlab-k8s-runner:
+    image: omhq/gitlab-k8s-runner:0.0.4
+    platform: linux/amd64
+    working_dir: /workspace
+    volumes:
+      - ./job.yml:/workspace/job.yml
+      - ./src:/workspace/src
+      - ./scripts:/workspace/scripts
+    entrypoint: ["/bin/bash", "-c", "chmod +x /workspace/scripts/run.sh && /workspace/scripts/run.sh"]
+    environment:
+      REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ROLE_ARN:
+      AWS_ACCESS_KEY_ID:
+      AWS_SECRET_ACCESS_KEY:
+
+      DEBUG: "False"
+
+      CLUSTER_NAME:
+      NAMESPACE:
+      JOB_NAME:

@@ -1,0 +1,20 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  namespace: default
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 0
+  activeDeadlineSeconds: 100
+  template:
+    metadata:
+      name: ""
+    spec:
+      serviceAccountName: eks-worker-service-account
+      restartPolicy: Never
+      nodeSelector:
+        node-group: default
+      containers:
+        - name: print-time
+          image: busybox
+          command: ["sh", "-c", "for i in $(seq 1 20); do date; sleep 3; done"]
