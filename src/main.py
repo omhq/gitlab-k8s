@@ -10,7 +10,12 @@ import multiprocessing
 
 from kubernetes.utils.create_from_yaml import FailToCreateError
 
-from internal.utils import get_status_code, create_signal_handler, cleanup_processes
+from internal.utils import (
+    get_status_code,
+    create_signal_handler,
+    create_signal_handler,
+    cleanup_processes,
+)
 from internal.logger import get_logger
 from internal.workers import (
     JobManager,
@@ -25,26 +30,24 @@ NAMESPACE = os.environ.get("NAMESPACE", "default")
 JOB_NAME = os.environ.get("JOB_NAME")
 
 logger = get_logger(__name__)
-job_status_queue = multiprocessing.Queue()
-job_exception_queue = multiprocessing.Queue()
-pod_log_queue = multiprocessing.Queue()
-k8s_client = KubernetesClient(REGION, CLUSTER_NAME)
-job_manager = JobManager(k8s_client, job_status_queue, job_exception_queue)
-pod_logger = JobPodLogger(k8s_client, pod_log_queue)
-running_jobs = []
-processes = []
 
 
-def main(manifest_path: str, namespace: str = "default") -> None:
-    """Main function to create a job and listen to its status and logs.
+def start_job(
+    job_manager: JobManager,
+    job_name: str,
+    manifest_path: str,
+    namespace: str,
+    running_jobs: list,
+) -> None:
+    """Start a job in the cluster.
 
     Args:
-        manifest_path (str): Path to the manifest file.
-        namespace (str): Namespace of the job.
+        job_manager: Job manager object.
+        job_name: Name of the job.
+        manifest_path: Path to the manifest file.
+        namespace: Namespace of the job.
+        running_jobs: List of running jobs.
     """
-    job_name = job_manager.construct_job_name(JOB_NAME)
-    ttl_seconds_after_finished = job_manager.ttl_seconds_after_finished
-
     try:
         job_manager.create_job(manifest_path, job_name, namespace=namespace)
         running_jobs.append(job_name)
@@ -65,10 +68,24 @@ def main(manifest_path: str, namespace: str = "default") -> None:
         logger.error(f"An error occurred while creating job {job_name}: {e}")
         sys.exit(1)
 
-    pods = job_manager.get_job_pods(job_name, namespace=namespace)
-    default_handler = signal.getsignal(signal.SIGTERM)
 
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+def start_listeners(
+    job_manager: JobManager,
+    pod_logger: JobPodLogger,
+    job_name: str,
+    namespace: str,
+    processes: list,
+) -> None:
+    """Start listeners for the job and its pods.
+
+    Args:
+        job_manager: Job manager object.
+        pod_logger: Job pod logger object.
+        job_name: Name of the job.
+        namespace: Namespace of the job.
+        processes: List of processes.
+    """
+    pods = job_manager.get_job_pods(job_name, namespace=namespace)
 
     job_listener_process = multiprocessing.Process(
         target=job_manager.listen_to_job, args=(job_name, namespace)
@@ -80,11 +97,27 @@ def main(manifest_path: str, namespace: str = "default") -> None:
 
     job_listener_process.start()
     pod_logger_process.start()
-    processes.append(job_listener_process.pid)
-    processes.append(pod_logger_process.pid)
+    processes.extend((job_listener_process.pid, pod_logger_process.pid))
 
-    signal.signal(signal.SIGTERM, default_handler)
 
+def main_loop(
+    job_manager: JobManager,
+    job_name: str,
+    namespace: str,
+    running_jobs: list,
+    processes: list,
+    ttl_seconds_after_finished: int,
+):
+    """Main loop to monitor the job and its pods.
+
+    Args:
+        job_manager: Job manager object.
+        job_name: Name of the job.
+        namespace: Namespace of the job.
+        running_jobs: List of running jobs.
+        processes: List of processes.
+        ttl_seconds_after_finished: Time to wait before exiting after job finishes.
+    """
     failure_detected_time = None
     job_failed = False
 
@@ -110,7 +143,9 @@ def main(manifest_path: str, namespace: str = "default") -> None:
             if status_code is not None:
                 if status_code == 0:
                     logger.info(f"Job {job_name} completed successfully.")
-                    cleanup_processes()
+                    cleanup_processes(
+                        job_manager, running_jobs, processes, namespace=namespace
+                    )
                     sys.exit(0)
 
                 if not job_failed:
@@ -121,18 +156,11 @@ def main(manifest_path: str, namespace: str = "default") -> None:
             and (time.time() - failure_detected_time) >= ttl_seconds_after_finished
         ):
             logger.error(f"Job {job_name} failed.")
-            cleanup_processes()
+            cleanup_processes(job_manager, running_jobs, processes, namespace=namespace)
             sys.exit(1)
 
 
 if __name__ == "__main__":
-    signal.signal(
-        signal.SIGTERM,
-        create_signal_handler(
-            job_manager, running_jobs, processes, namespace=NAMESPACE
-        ),
-    )
-
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-m",
@@ -143,4 +171,34 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     manifest_path = args.manifest_path
-    main(manifest_path, namespace=NAMESPACE)
+    running_jobs = []
+    processes = []
+
+    job_status_queue = multiprocessing.Queue()
+    job_exception_queue = multiprocessing.Queue()
+    pod_log_queue = multiprocessing.Queue()
+
+    k8s_client = KubernetesClient(REGION, CLUSTER_NAME)
+    job_manager = JobManager(k8s_client, job_status_queue, job_exception_queue)
+    pod_logger = JobPodLogger(k8s_client, pod_log_queue)
+    job_name = job_manager.construct_job_name(JOB_NAME)
+    ttl = job_manager.ttl_seconds_after_finished
+
+    start_job(job_manager, job_name, manifest_path, NAMESPACE, running_jobs)
+    start_listeners(job_manager, pod_logger, job_name, NAMESPACE, processes)
+
+    signal.signal(
+        signal.SIGTERM,
+        create_signal_handler(
+            job_manager, running_jobs, processes, namespace=NAMESPACE
+        ),
+    )
+
+    main_loop(
+        job_manager,
+        job_name,
+        NAMESPACE,
+        running_jobs,
+        processes,
+        ttl,
+    )
