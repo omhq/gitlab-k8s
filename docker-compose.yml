@@ -1,4 +1,4 @@
-version: '3.1'
+version: "3.1"
 
 services:
   gitlab-k8s-runner:
@@ -9,7 +9,17 @@ services:
       - ./job.yml:/workspace/job.yml
       - ./src:/workspace/src
       - ./scripts:/workspace/scripts
-    entrypoint: ["/bin/bash", "-c", "chmod +x /workspace/scripts/run.sh && /workspace/scripts/run.sh"]
+    entrypoint:
+      - /bin/bash
+      - -c
+      - source ./scripts/init.sh
+      - aws sts get-caller-identity
+      - >
+        exec python3 /workspace/src/main.py
+        --manifest_path /workspace/job.yml
+        --namespace default
+        --job_name job-name
+        --job_id job-id
     environment:
       REGION: us-east-1
       AWS_DEFAULT_REGION: us-east-1
@@ -20,5 +30,3 @@ services:
       DEBUG: "False"
 
       CLUSTER_NAME:
-      NAMESPACE:
-      JOB_NAME:
