@@ -26,8 +26,6 @@ from internal.workers import (
 
 REGION = os.environ.get("REGION", "us-east-1")
 CLUSTER_NAME = os.environ.get("CLUSTER_NAME", None)
-NAMESPACE = os.environ.get("NAMESPACE", "default")
-JOB_NAME = os.environ.get("JOB_NAME")
 
 logger = get_logger(__name__)
 
@@ -35,6 +33,7 @@ logger = get_logger(__name__)
 def start_job(
     job_manager: JobManager,
     job_name: str,
+    job_id: str,
     manifest_path: str,
     namespace: str,
     running_jobs: list,
@@ -44,12 +43,13 @@ def start_job(
     Args:
         job_manager: Job manager object.
         job_name: Name of the job.
+        job_id: ID of the job.
         manifest_path: Path to the manifest file.
         namespace: Namespace of the job.
         running_jobs: List of running jobs.
     """
     try:
-        job_manager.create_job(manifest_path, job_name, namespace=namespace)
+        job_manager.create_job(manifest_path, job_name, job_id, namespace=namespace)
         running_jobs.append(job_name)
     except FailToCreateError as e:
         for api_exception in e.api_exceptions:
@@ -163,14 +163,34 @@ def main_loop(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "-m",
         "--manifest_path",
         type=str,
         required=True,
         help="Path to the manifest file",
     )
+    parser.add_argument(
+        "--namespace",
+        type=str,
+        default="default",
+        help="Namespace of the job",
+    )
+    parser.add_argument(
+        "--job_name",
+        type=str,
+        required=True,
+        help="Job name",
+    )
+    parser.add_argument(
+        "--job_id",
+        type=str,
+        required=True,
+        help="Job ID",
+    )
     args = parser.parse_args()
     manifest_path = args.manifest_path
+    namespace = args.namespace
+    job_name = args.job_name
+    job_id = args.job_id
     running_jobs = []
     processes = []
 
@@ -181,23 +201,23 @@ if __name__ == "__main__":
     k8s_client = KubernetesClient(REGION, CLUSTER_NAME)
     job_manager = JobManager(k8s_client, job_status_queue, job_exception_queue)
     pod_logger = JobPodLogger(k8s_client, pod_log_queue)
-    job_name = job_manager.construct_job_name(JOB_NAME)
+    job_name = job_manager.construct_job_name(job_name)
     ttl = job_manager.ttl_seconds_after_finished
 
-    start_job(job_manager, job_name, manifest_path, NAMESPACE, running_jobs)
-    start_listeners(job_manager, pod_logger, job_name, NAMESPACE, processes)
+    start_job(job_manager, job_name, job_id, manifest_path, namespace, running_jobs)
+    start_listeners(job_manager, pod_logger, job_name, namespace, processes)
 
     signal.signal(
         signal.SIGTERM,
         create_signal_handler(
-            job_manager, running_jobs, processes, namespace=NAMESPACE
+            job_manager, running_jobs, processes, namespace=namespace
         ),
     )
 
     main_loop(
         job_manager,
         job_name,
-        NAMESPACE,
+        namespace,
         running_jobs,
         processes,
         ttl,

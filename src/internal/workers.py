@@ -179,12 +179,14 @@ class JobManager:
         return f"{normalized_job_name}-{str(uuid.uuid4())[:12]}"
 
     def create_job(
-        self, manifest_path: str, job_name: str, namespace: str = "default"
+        self, manifest_path: str, job_name: str, job_id: str, namespace: str = "default"
     ) -> None:
         """Submit a namespaced job workload to the cluster.
 
         Args:
             manifest_path: Path to the job manifest file.
+            job_name: Job name.
+            job_id: Job ID.
             namespace: The namespace in which to create the job.
         """
         with open(manifest_path, "r") as file:
@@ -200,6 +202,7 @@ class JobManager:
 
         for container in containers:
             env_vars = container.get("env", [])
+            env_vars.append({"name": "CI_JOB_ID", "value": job_id})
             env_vars.append({"name": "BRANCH", "value": BRANCH})
             env_vars.append({"name": "DEBUG", "value": str(DEBUG)})
             container["env"] = env_vars
