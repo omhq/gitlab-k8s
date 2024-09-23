@@ -6,27 +6,24 @@ services:
     platform: linux/amd64
     working_dir: /workspace
     volumes:
-      - ./job.yml:/workspace/job.yml
+      - ./job-busybox.yml:/workspace/job.yml
       - ./src:/workspace/src
       - ./scripts:/workspace/scripts
     entrypoint:
       - /bin/bash
       - -c
+      - |
       - source ./scripts/init.sh
       - aws sts get-caller-identity
       - >
-        exec python3 /workspace/src/main.py
-        --manifest_path /workspace/job.yml
-        --namespace default
-        --job_name job-name
-        --job_id job-id
+        exec python3 /workspace/src/main.py \
+          --manifest_path /workspace/job.yml \
+          --namespace cicd \
+          --job_name job-busybox \
+          --job_id 123xyz
     environment:
       REGION: us-east-1
       AWS_DEFAULT_REGION: us-east-1
-      AWS_ROLE_ARN:
-      AWS_ACCESS_KEY_ID:
-      AWS_SECRET_ACCESS_KEY:
 
       DEBUG: "False"
-
-      CLUSTER_NAME:
+      CLUSTER_NAME: worker-cluster
