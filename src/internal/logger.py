@@ -4,6 +4,9 @@ import logging
 default_format = (
     "%(asctime)s %(filename)s:%(lineno)d [%(levelname)s] %(name)s: %(message)s"
 )
+abridged_format = (
+    "%(asctime)s [%(levelname)s] %(message)s"
+)
 default_datefmt = "%Y-%m-%d %H:%M:%S"
 default_log_args = {
     "level": (
@@ -11,7 +14,7 @@ default_log_args = {
         if os.environ.get("DEBUG", "false").lower() == "true"
         else logging.INFO
     ),
-    "format": default_format,
+    "format": abridged_format,
     "datefmt": default_datefmt,
     "force": True,
 }
