@@ -12,8 +12,8 @@ logger = get_logger(__name__)
 
 
 def get_status_code(status: V1JobStatus) -> int:
-    """
-    Returns 0 if the job is successful, 1 if the job has failed, and None if the job is still active.
+    """Returns 0 if the job is successful, 1 if the job has failed,
+    and None if the job is still active.
 
     Args:
         status (V1JobStatus): The status of the job.

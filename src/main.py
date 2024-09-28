@@ -28,6 +28,7 @@ REGION = os.environ.get("REGION", "us-east-1")
 CLUSTER_NAME = os.environ.get("CLUSTER_NAME", None)
 
 logger = get_logger(__name__)
+stop_event = multiprocessing.Event()
 
 
 def start_job(
@@ -107,6 +108,7 @@ def main_loop(
     running_jobs: list,
     processes: list,
     ttl_seconds_after_finished: int,
+    stop_event: multiprocessing.Event,
 ):
     """Main loop to monitor the job and its pods.
 
@@ -117,16 +119,14 @@ def main_loop(
         running_jobs: List of running jobs.
         processes: List of processes.
         ttl_seconds_after_finished: Time to wait before exiting after job finishes.
+        stop_event: Event to signal the main loop to stop.
     """
     failure_detected_time = None
     job_failed = False
+    job_status_code = None
 
     while True:
         sys.stdout.flush()
-
-        with contextlib.suppress(queue.Empty):
-            pod_log = pod_log_queue.get_nowait()
-            logger.info(pod_log)
 
         with contextlib.suppress(queue.Empty):
             exception = job_exception_queue.get_nowait()
@@ -135,13 +135,14 @@ def main_loop(
             if not job_failed:
                 job_failed = True
                 failure_detected_time = time.time()
+                stop_event.set() 
 
         with contextlib.suppress(queue.Empty):
             status = job_status_queue.get_nowait()
-            status_code = get_status_code(status)
+            job_status_code = get_status_code(status)
 
-            if status_code is not None:
-                if status_code == 0:
+            if job_status_code is not None:
+                if job_status_code == 0:
                     logger.info(f"Job {job_name} completed successfully.")
                     cleanup_processes(
                         job_manager, running_jobs, processes, namespace=namespace
@@ -151,6 +152,13 @@ def main_loop(
                 if not job_failed:
                     job_failed = True
                     failure_detected_time = time.time()
+                    stop_event.set()
+
+        with contextlib.suppress(queue.Empty):
+            if job_status_code is None:
+                pod_log = pod_log_queue.get_nowait()
+                logger.info(pod_log)
+
         if (
             job_failed
             and (time.time() - failure_detected_time) >= ttl_seconds_after_finished
@@ -200,7 +208,7 @@ if __name__ == "__main__":
 
     k8s_client = KubernetesClient(REGION, CLUSTER_NAME)
     job_manager = JobManager(k8s_client, job_status_queue, job_exception_queue)
-    pod_logger = JobPodLogger(k8s_client, pod_log_queue)
+    pod_logger = JobPodLogger(k8s_client, pod_log_queue, stop_event)
     job_name = job_manager.construct_job_name(job_name)
     ttl = job_manager.ttl_seconds_after_finished
 
@@ -221,4 +229,5 @@ if __name__ == "__main__":
         running_jobs,
         processes,
         ttl,
+        stop_event,
     )

@@ -11,8 +11,9 @@ import multiprocessing
 
 from typing import Union
 from datetime import timezone, datetime, timedelta
+from dateutil import parser
 from urllib3.exceptions import ProtocolError
-from kubernetes import client, watch
+from kubernetes import client
 from kubernetes.utils import create_from_dict
 from kubernetes.client.rest import ApiException
 from botocore import session
@@ -242,7 +243,7 @@ class JobManager:
             namespace: Cluster namespace.
         """
         while True:
-            time.sleep(5)
+            time.sleep(1)
 
             try:
                 job = self.get_job(job_name, namespace)
@@ -281,9 +282,12 @@ class JobPodLogger:
         self,
         k8s_client: KubernetesClient,
         pod_log_queue: multiprocessing.Queue,
+        stop_event: multiprocessing.Event,
     ):
         self.core_v1 = k8s_client.core_v1
         self.pod_log_queue = pod_log_queue
+        self.stop_event = stop_event
+        self.last_timestamp = None
 
     def check_pod_status(self, pod_name: str, namespace: str) -> str:
         """Check the status of a pod.
@@ -299,59 +303,95 @@ class JobPodLogger:
             name=pod_name, namespace=namespace
         ).status.phase
 
-    def stream_logs(self, pod_name: str, namespace: str, w: watch.Watch) -> None:
+    def stream_logs(self, pod_name: str, namespace: str) -> None:
         """Stream logs from a pod.
 
         Args:
             pod_name: Pod name.
             namespace: Cluster namespace.
-            w: Watch object.
         """
         retries = 0
         max_retries = 2
 
-        while retries < max_retries:
+        while retries < max_retries and not self.stop_event.is_set():
+            pod_status = self.check_pod_status(pod_name, namespace)
+
+            if pod_status != "Running":
+                logger.debug(f"Pod {pod_name} is not running. Exiting log stream.")
+                break
+
             try:
-                stream = w.stream(
-                    self.core_v1.read_namespaced_pod_log,
+                # Prepare the since_seconds parameter
+                if self.last_timestamp:
+                    time_diff = datetime.now(timezone.utc) - self.last_timestamp
+                    since_seconds = int(time_diff.total_seconds())
+                    # Ensure since_seconds is non-negative
+                    since_seconds = max(since_seconds, 1)
+                else:
+                    since_seconds = None
+
+                stream = self.core_v1.read_namespaced_pod_log(
                     name=pod_name,
                     namespace=namespace,
                     follow=True,
                     _preload_content=False,
+                    timestamps=True,
+                    since_seconds=since_seconds,
                 )
 
-                for log_line in stream:
-                    self.pod_log_queue.put(log_line)
-            except ProtocolError as e:
-                logger.error(
-                    f"{type(e).__name__} exception occurred while streaming logs: {e}"
-                )
-                time.sleep(5)
-                retries += 1
-                continue
+                for line in stream:
+                    if self.stop_event.is_set():
+                        break
+
+                    log_line = line.decode("utf-8").rstrip("\n")
+
+                    try:
+                        timestamp_str, message = log_line.split(" ", 1)
+                        self.pod_log_queue.put(message)
+                        self.last_timestamp = parser.parse(timestamp_str)
+                    except ValueError:
+                        logger.warning(f"Unable to parse log line: {log_line}")
+                        self.pod_log_queue.put(log_line)
+
+                pod_status = self.check_pod_status(pod_name, namespace)
+
+                if pod_status != "Running":
+                    logger.debug(f"Pod {pod_name} has terminated. Exiting log stream.")
+                    break
+                else:
+                    logger.debug("Stream ended unexpectedly. Retrying...")
+                    time.sleep(5)
+                    continue
             except Exception as e:
                 logger.error(
                     f"An error occurred while streaming logs for pod {pod_name}: {e}"
                 )
+                pod_status = self.check_pod_status(pod_name, namespace)
+
+                if pod_status != "Running":
+                    logger.debug(f"Pod {pod_name} has terminated. Exiting log stream.")
+                    break
+
                 time.sleep(5)
                 retries += 1
                 continue
 
     def stream_logs_from_pod(self, pod_name: str, namespace: str = "default") -> None:
         """Parallelize pod log streaming instead of streaming logs sequentially for each pod."""
-        w = watch.Watch()
-
-        while True:
+        while not self.stop_event.is_set():
             pod_status = self.check_pod_status(pod_name, namespace)
 
             if pod_status == "Running":
                 logger.debug(f"Pod {pod_name} is running, starting log stream")
+                self.stream_logs(pod_name, namespace)
                 break
-
-            logger.debug(
-                f"Pod {pod_name} is not running yet, current status: {pod_status}"
-            )
-
-            time.sleep(5)
-
-        self.stream_logs(pod_name, namespace, w)
+            elif pod_status in ["Failed", "Succeeded"]:
+                logger.debug(
+                    f"Pod {pod_name} has terminated with status {pod_status}. Exiting."
+                )
+                break
+            else:
+                logger.debug(
+                    f"Pod {pod_name} is not running yet, current status: {pod_status}"
+                )
+                time.sleep(5)
