@@ -1,5 +1,6 @@
 import os
 import re
+import ssl
 import uuid
 import yaml
 import time
@@ -12,10 +13,11 @@ import multiprocessing
 from typing import Union
 from datetime import timezone, datetime, timedelta
 from dateutil import parser
+from requests.exceptions import ConnectionError, Timeout
 from urllib3.exceptions import ProtocolError
 from kubernetes import client
 from kubernetes.utils import create_from_dict
-from kubernetes.client.rest import ApiException
+from kubernetes.client.exceptions import ApiException
 from botocore import session
 from awscli.customizations.eks.get_token import (
     STSClientFactory,
@@ -29,6 +31,25 @@ BRANCH = os.getenv("BRANCH", "main")
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
 logger = get_logger(__name__)
+
+
+def handle_unauthorized(func):
+    def wrapper(self, *args, **kwargs):
+        retries = 5
+        for _ in range(retries):
+            try:
+                return func(self, *args, **kwargs)
+            except ApiException as e:
+                if e.status == 401:
+                    logger.warning(f"Received 401 Unauthorized error: {e}")
+                    self.k8s_client.load_client()
+                    self.core_v1 = self.k8s_client.core_v1
+                    self.batch_v1 = self.k8s_client.batch_v1
+                    continue
+                else:
+                    raise
+        raise ApiException("Maximum retries exceeded after refreshing the token.")
+    return wrapper
 
 
 class JobFailedException(Exception):
@@ -48,12 +69,24 @@ class KubernetesClient:
         self.eks_client = boto3.client("eks", region_name=self.region)
         self.client_factory = STSClientFactory(session.get_session())
 
-        cafile, k8s_client = self.make_k8s_client()
-        self.cafile = cafile
-        self.k8s_client = k8s_client
+        self.load_client()
 
+    def load_client(self):
+        """Load the Kubernetes client configuration."""
+        try:
+            with contextlib.suppress(Exception):
+                self.k8s_client.close()
+            with contextlib.suppress(Exception):
+                self.cafile.close()
+                self.cafile.delete()
+        except Exception as e:
+            logger.error(f"Failed to close existing k8s client: {e}")
+
+        self.cafile, self.k8s_client = self.make_k8s_client()
         self.core_v1 = client.CoreV1Api(self.k8s_client)
         self.batch_v1 = client.BatchV1Api(self.k8s_client)
+
+        logger.debug("Successfully loaded Kubernetes client with new authentication tokens.")
 
     def __del__(self):
         """Delete the CA cert temp file and close k8s connection."""
@@ -210,6 +243,7 @@ class JobManager:
 
         create_from_dict(self.k8s_client, job_manifest, namespace=namespace)
 
+    @handle_unauthorized
     def get_job(self, name: str, namespace: str = "default") -> client.V1Job:
         """Try to retrieve a namespaced job workload.
 
@@ -221,7 +255,8 @@ class JobManager:
             V1Job
         """
         return self.batch_v1.read_namespaced_job(name, namespace)
-
+    
+    @handle_unauthorized
     def delete_job(self, name: str, namespace: str = "default") -> client.V1Status:
         """Try to delete a namespaced job.
 
@@ -253,6 +288,7 @@ class JobManager:
             except ApiException as e:
                 self.exception_queue.put(e)
 
+    @handle_unauthorized
     def get_job_pods(
         self, job_name: str, namespace: str = "default", poll_interval: int = 5
     ) -> list:
@@ -284,11 +320,13 @@ class JobPodLogger:
         pod_log_queue: multiprocessing.Queue,
         stop_event: multiprocessing.Event,
     ):
+        self.k8s_client = k8s_client
         self.core_v1 = k8s_client.core_v1
         self.pod_log_queue = pod_log_queue
         self.stop_event = stop_event
         self.last_timestamp = None
 
+    @handle_unauthorized
     def check_pod_status(self, pod_name: str, namespace: str) -> str:
         """Check the status of a pod.
 
@@ -303,6 +341,7 @@ class JobPodLogger:
             name=pod_name, namespace=namespace
         ).status.phase
 
+    @handle_unauthorized
     def stream_logs(self, pod_name: str, namespace: str) -> None:
         """Stream logs from a pod.
 
@@ -314,13 +353,13 @@ class JobPodLogger:
         max_retries = 2
 
         while retries < max_retries and not self.stop_event.is_set():
-            pod_status = self.check_pod_status(pod_name, namespace)
-
-            if pod_status != "Running":
-                logger.debug(f"Pod {pod_name} is not running. Exiting log stream.")
-                break
-
             try:
+                pod_status = self.check_pod_status(pod_name, namespace)
+
+                if pod_status != "Running":
+                    logger.debug(f"Pod {pod_name} is not running. Exiting log stream.")
+                    break
+
                 # Prepare the since_seconds parameter
                 if self.last_timestamp:
                     time_diff = datetime.now(timezone.utc) - self.last_timestamp
@@ -349,7 +388,7 @@ class JobPodLogger:
                         timestamp_str, message = log_line.split(" ", 1)
                         self.pod_log_queue.put(message)
                         self.last_timestamp = parser.parse(timestamp_str)
-                    except ValueError:
+                    except ValueError as e:
                         logger.warning(f"Unable to parse log line: {log_line}")
                         self.pod_log_queue.put(log_line)
 
@@ -362,6 +401,11 @@ class JobPodLogger:
                     logger.debug("Stream ended unexpectedly. Retrying...")
                     time.sleep(5)
                     continue
+            except (ConnectionError, Timeout, ProtocolError, ssl.SSLError) as e:
+                logger.error(f"Network error while streaming logs for pod {pod_name}: {e}")
+                retries += 1
+                time.sleep(5)
+                continue
             except Exception as e:
                 logger.error(
                     f"An error occurred while streaming logs for pod {pod_name}: {e}"

@@ -1,11 +1,17 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  namespace: default
+  namespace: kubefill
 spec:
-  ttlSecondsAfterFinished: 100
+  # 4 hours in seconds (4 * 60 * 60) the job will be terminated if it runs longer than this
+  activeDeadlineSeconds: 14400
+
+  # 5 minutes in seconds (5 * 60) the job will be deleted after it finishes
+  ttlSecondsAfterFinished: 300
+
+  # 1 try
   backoffLimit: 0
-  activeDeadlineSeconds: 100
+
   template:
     metadata:
       name: ""
@@ -17,4 +23,4 @@ spec:
       containers:
         - name: print-time
           image: busybox
-          command: ["sh", "-c", "for i in $(seq 1 20); do date; sleep 3; done"]
+          command: ["sh", "-c", "for i in $(seq 1 1); do date; sleep 240; done; exit 0"]

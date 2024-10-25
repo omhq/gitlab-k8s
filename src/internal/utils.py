@@ -37,7 +37,7 @@ def terminate_process(pid: int) -> None:
     Args:
         pid (int): Process ID of the process to terminate.
     """
-    logger.info(f"Process {pid} terminating.")
+    logger.debug(f"Process {pid} terminating.")
 
     try:
         process = psutil.Process(pid)
@@ -45,14 +45,14 @@ def terminate_process(pid: int) -> None:
 
         try:
             process.wait(timeout=2)
-            logger.info(f"Process {pid} terminated successfully.")
+            logger.debug(f"Process {pid} terminated successfully.")
         except psutil.TimeoutExpired:
-            logger.info(
+            logger.debug(
                 f"Timeout expired while waiting for process {pid} to terminate. Sending SIGKILL."
             )
             process.kill()
             process.wait(timeout=2)
-            logger.info(f"Process {pid} killed successfully.")
+            logger.debug(f"Process {pid} killed successfully.")
     except psutil.NoSuchProcess:
         logger.info(f"No process found with PID {pid}.")
     except psutil.AccessDenied:
@@ -75,10 +75,10 @@ def cleanup_processes(
         namespace: Namespace of the job.
     """
     for job_name in running_jobs:
-        logger.info(f"Deleting job {job_name}...")
+        logger.debug(f"Deleting job {job_name}...")
         try:
             job_manager.delete_job(job_name, namespace=namespace)
-            logger.info(f"Deleted job {job_name}.")
+            logger.debug(f"Deleted job {job_name}.")
         except ApiException as e:
             try:
                 error_details = json.loads(e.body)
@@ -90,7 +90,7 @@ def cleanup_processes(
                 logger.error(f"An error occurred while deleting job {job_name}: {e}")
 
     for process in processes:
-        logger.info(f"Terminating process {process}...")
+        logger.debug(f"Terminating process {process}...")
         terminate_process(process)
 
 
@@ -109,8 +109,7 @@ def create_signal_handler(
         Returns:
             callable: Signal handler function.
         """
-        logger.info(f"Received signal {signum}, terminating processes...")
-        logger.info(f"processes {processes}")
+        logger.debug(f"Received signal {signum}, terminating processes...")
         cleanup_processes(job_manager, running_jobs, processes, namespace=namespace)
         sys.exit(0)
 

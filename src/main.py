@@ -13,7 +13,6 @@ from kubernetes.utils.create_from_yaml import FailToCreateError
 from internal.utils import (
     get_status_code,
     create_signal_handler,
-    create_signal_handler,
     cleanup_processes,
 )
 from internal.logger import get_logger
