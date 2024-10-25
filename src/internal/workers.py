@@ -176,7 +176,7 @@ class JobManager:
         status_queue: multiprocessing.Queue,
         exception_queue: multiprocessing.Queue,
     ):
-        self.k8s_client = k8s_client.k8s_client
+        self.k8s_client = k8s_client
         self.batch_v1 = k8s_client.batch_v1
         self.core_v1 = k8s_client.core_v1
         self.status_queue = status_queue
@@ -241,7 +241,7 @@ class JobManager:
             env_vars.append({"name": "DEBUG", "value": str(DEBUG)})
             container["env"] = env_vars
 
-        create_from_dict(self.k8s_client, job_manifest, namespace=namespace)
+        create_from_dict(self.k8s_client.k8s_client, job_manifest, namespace=namespace)
 
     @handle_unauthorized
     def get_job(self, name: str, namespace: str = "default") -> client.V1Job:
